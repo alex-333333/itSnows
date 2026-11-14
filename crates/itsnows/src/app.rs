@@ -2,7 +2,7 @@
 
 use std::time::{Duration, Instant};
 
-use snow_core::{FrameInput, Prim, World};
+use snow_core::{FrameInput, Prim, SurfaceIn, World};
 use windows::core::w;
 use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
 use windows::Win32::System::Threading::CreateMutexW;
@@ -13,11 +13,12 @@ use crate::config::AppSettings;
 use crate::gfx::Gfx;
 use crate::overlay::{self, Event, Overlay};
 use crate::tray::{Command, MenuState, Tray};
-use crate::{hotkeys, system};
+use crate::{hotkeys, system, tracker};
 
 const FULLSCREEN_POLL: Duration = Duration::from_secs(1);
 const BATTERY_POLL: Duration = Duration::from_secs(10);
 const TOPMOST_POLL: Duration = Duration::from_secs(2);
+const TRACKER_POLL: Duration = Duration::from_millis(250);
 /// How long to sleep between checks while nothing needs drawing.
 const IDLE_WAIT_MS: u32 = 250;
 
@@ -101,7 +102,7 @@ impl App {
                 self.changed();
             }
             Command::CallBlower => {}
-            Command::ClearSnow => {}
+            Command::ClearSnow => self.world.clear_snow(),
             Command::TogglePlay => self.set_play(!self.play),
             Command::ToggleCapture => {
                 self.settings.show_in_capture = !self.settings.show_in_capture;
@@ -228,7 +229,8 @@ pub fn run() {
     let mut fullscreen_checked = last;
     let mut battery_checked = last;
     let mut topmost_checked = last;
-    let mut idle_frame_shown = false;
+    let mut tracker_checked = last - TRACKER_POLL;
+    let mut surfaces: Vec<SurfaceIn> = Vec::new();
 
     while app.pump() {
         let now = Instant::now();
@@ -259,6 +261,12 @@ pub fn run() {
             }
         }
 
+        if now - tracker_checked >= TRACKER_POLL {
+            tracker_checked = now;
+            let (screen_w, screen_h) = overlay::primary_size();
+            surfaces = tracker::snapshot(app.overlay.hwnd, screen_w as f32, screen_h as f32);
+        }
+
         let dt = (now - last).as_secs_f32();
         last = now;
         let core_settings = app.settings.to_core();
@@ -266,7 +274,7 @@ pub fn run() {
             dt,
             width: app.overlay.width as f32,
             height: app.overlay.height as f32,
-            surfaces: &[],
+            surfaces: &surfaces,
             settings: &core_settings,
             pointer: None,
         });
@@ -274,20 +282,14 @@ pub fn run() {
             app.set_play(false);
         }
 
-        if out.idle {
-            // Nothing is moving: show one empty frame, then stop drawing.
-            if !idle_frame_shown {
-                app.render(&[]);
-                idle_frame_shown = true;
-            }
-            wait(IDLE_WAIT_MS);
-            continue;
-        }
-        idle_frame_shown = false;
-
         prims.clear();
         app.world.draw(&mut prims);
         app.render(&prims);
+        if out.idle {
+            // Nothing is moving: drop to a few frames a second. Still drawn,
+            // because standing things (lights, snowmen) follow the desktop.
+            wait(IDLE_WAIT_MS);
+        }
     }
 
     hotkeys::unregister_all();

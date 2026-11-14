@@ -14,6 +14,8 @@ mod hotkeys;
 #[cfg(windows)]
 mod system;
 #[cfg(windows)]
+mod tracker;
+#[cfg(windows)]
 mod tray;
 
 #[cfg(windows)]
