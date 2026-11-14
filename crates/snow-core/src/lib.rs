@@ -6,6 +6,7 @@ pub mod occlusion;
 pub mod pile;
 pub mod prim;
 pub mod rng;
+pub mod surfaces;
 pub mod world;
 
 pub use flakes::{Flake, Layer};

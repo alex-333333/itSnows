@@ -1,8 +1,13 @@
 //! The world: owns all simulation state, steps it, and emits a draw list.
 
-use crate::flakes::{Flakes, Layer};
+use crate::flakes::{Flake, Flakes, Layer};
+use crate::pile::HeightMap;
 use crate::prim::{Prim, Rgba};
 use crate::rng::Rng;
+use crate::surfaces::{Shed, Surfaces};
+pub use crate::surfaces::{DEPOSIT_AREA, GROUND_CAP, MELT_RATE, SHED_MAX, WINDOW_CAP, WINDOW_EDGE_MAX, WINDOW_LAND_CHANCE};
+
+const SNOW: Rgba = Rgba::new(0.96, 0.98, 1.0, 1.0);
 
 /// Longest time a single step may advance. A stalled frame or a resume from
 /// sleep must not turn into a burst of simulation.
@@ -82,6 +87,10 @@ pub struct World {
     width: f32,
     height: f32,
     flakes: Flakes,
+    surfaces: Surfaces,
+    shed: Vec<Shed>,
+    /// Flakes spawned from snow that came loose, in total.
+    shed_count: u64,
 }
 
 fn sanitize_dt(dt: f32) -> f32 {
@@ -96,7 +105,7 @@ impl World {
     pub fn new(seed: u64) -> Self {
         let mut rng = Rng::new(seed);
         let flakes = Flakes::new(&mut rng);
-        Self { rng, t: 0.0, width: 0.0, height: 0.0, flakes }
+        Self { rng, t: 0.0, width: 0.0, height: 0.0, flakes, surfaces: Surfaces::default(), shed: Vec::new(), shed_count: 0 }
     }
 
     pub fn step(&mut self, input: &FrameInput) -> StepOutput {
@@ -106,6 +115,7 @@ impl World {
             self.width = 0.0;
             self.height = 0.0;
             self.flakes.list.clear();
+            self.shed.clear();
             return StepOutput { idle: true, exit_play: false };
         }
         self.width = w;
@@ -115,8 +125,77 @@ impl World {
         let intensity = if input.settings.intensity.is_finite() { input.settings.intensity.clamp(0.0, 1.0) } else { 0.0 };
         self.flakes.update(dt, self.t, w, h, intensity, &mut self.rng);
 
-        let idle = intensity == 0.0 && self.flakes.list.is_empty();
+        self.surfaces.reconcile(input.surfaces, &mut self.shed);
+        self.land_flakes(dt);
+        self.surfaces.settle(dt, intensity == 0.0, &mut self.shed);
+        self.spawn_shed();
+
+        let idle = intensity == 0.0 && self.flakes.list.is_empty() && self.surfaces.all_empty();
         StepOutput { idle, exit_play: false }
+    }
+
+    /// Move flakes that reached a pile into it.
+    fn land_flakes(&mut self, dt: f32) {
+        let piles = &mut self.surfaces.piles;
+        let rng = &mut self.rng;
+        self.flakes.list.retain_mut(|f| {
+            let bottom = f.y + f.r;
+            let prev_bottom = bottom - f.vy * dt;
+            for pile in piles.iter_mut() {
+                let line = pile.line_at(f.x);
+                match pile.kind {
+                    SurfaceKind::Ground => {
+                        // The ground catches everything that gets this far.
+                        if bottom >= line {
+                            pile.map.deposit(f.x, DEPOSIT_AREA);
+                            return false;
+                        }
+                    }
+                    SurfaceKind::WindowTop => {
+                        let crossing = prev_bottom <= line && bottom >= line;
+                        if f.layer == Layer::Near && crossing && pile.is_visible_at(f.x) && !f.passed.contains(&pile.id) {
+                            if rng.chance(WINDOW_LAND_CHANCE) {
+                                pile.map.deposit(f.x, DEPOSIT_AREA);
+                                return false;
+                            }
+                            f.passed.push(pile.id);
+                        }
+                    }
+                }
+            }
+            true
+        });
+    }
+
+    /// Turn snow that came loose into falling flakes.
+    fn spawn_shed(&mut self) {
+        self.shed_count += self.shed.len() as u64;
+        for s in self.shed.drain(..) {
+            let mut flake = Flake::near(&mut self.rng, s.x, s.y, 0.0, 0.0);
+            flake.vx = self.rng.range(-25.0, 25.0);
+            flake.vy = self.rng.range(40.0, 120.0);
+            flake.passed.push(s.from);
+            self.flakes.push_burst(flake, self.width, self.height);
+        }
+    }
+
+    /// Empty every pile (tray "Clear all snow").
+    pub fn clear_snow(&mut self) {
+        self.surfaces.clear();
+    }
+
+    pub fn pile_mean_height(&self, id: u64) -> Option<f32> {
+        self.surfaces.piles.iter().find(|p| p.id == id).map(|p| p.map.mean_height())
+    }
+
+    /// The ground surface's pile, if there is a ground.
+    pub fn ground(&self) -> Option<&HeightMap> {
+        self.surfaces.ground().map(|p| &p.map)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fill_ground(&mut self, h: f32) {
+        self.surfaces.ground_mut().expect("ground").map.fill(h);
     }
 
     /// Append this frame's primitives, back to front.
@@ -126,6 +205,12 @@ impl World {
         }
         self.draw_flakes(out, Layer::Far);
         self.draw_flakes(out, Layer::Mid);
+        for pile in &self.surfaces.piles {
+            let pts = pile.map.outline(pile.y);
+            if !pts.is_empty() {
+                out.push(Prim::Polygon { pts, color: SNOW });
+            }
+        }
         self.draw_flakes(out, Layer::Near);
     }
 
@@ -284,5 +369,271 @@ mod tests {
         assert!(radii.iter().all(|r| (1.0..=4.0).contains(r)));
         assert!(radii.iter().any(|r| *r < 1.5));
         assert!(radii.iter().any(|r| *r > 2.5));
+    }
+
+    // ---- accumulation ----
+
+    const SW: f32 = 1920.0;
+    const SH: f32 = 1080.0;
+    const GROUND_ID: u64 = 1;
+
+    fn ground(w: f32, y: f32) -> SurfaceIn {
+        SurfaceIn { id: GROUND_ID, x0: 0.0, x1: w, y, kind: SurfaceKind::Ground, visible: vec![(0.0, w)] }
+    }
+
+    fn window(id: u64, x0: f32, x1: f32, y: f32) -> SurfaceIn {
+        SurfaceIn { id, x0, x1, y, kind: SurfaceKind::WindowTop, visible: vec![(x0, x1)] }
+    }
+
+    fn step_s(world: &mut World, dt: f32, intensity: f32, surfaces: &[SurfaceIn]) -> StepOutput {
+        let s = settings(intensity);
+        world.step(&FrameInput { dt, width: SW, height: SH, surfaces, settings: &s, pointer: None })
+    }
+
+    fn run_s(world: &mut World, secs: f32, intensity: f32, surfaces: &[SurfaceIn]) {
+        let dt = 1.0 / 30.0;
+        for _ in 0..(secs / dt).round() as usize {
+            step_s(world, dt, intensity, surfaces);
+        }
+    }
+
+    fn pile_of(world: &World, id: u64) -> &HeightMap {
+        &world.surfaces.piles.iter().find(|p| p.id == id).expect("pile").map
+    }
+
+    fn max_height(m: &HeightMap) -> f32 {
+        (0..m.len()).map(|i| m.col_height(i)).fold(0.0, f32::max)
+    }
+
+    #[test]
+    fn ground_collects_snow() {
+        let mut w = World::new(1);
+        run_s(&mut w, 60.0, 1.0, &[ground(SW, 1040.0)]);
+        assert!(w.pile_mean_height(GROUND_ID).unwrap() > 1.0);
+        assert!(w.ground().is_some());
+    }
+
+    #[test]
+    fn flakes_do_not_fall_below_ground() {
+        let mut w = World::new(1);
+        let surfaces = [ground(SW, 1040.0)];
+        run_s(&mut w, 30.0, 1.0, &surfaces);
+        assert!(w.flakes.list.iter().all(|f| f.y - f.r <= 1040.0));
+    }
+
+    #[test]
+    fn window_top_collects_less() {
+        let mut w = World::new(2);
+        let surfaces = [ground(SW, 1040.0), window(5, 400.0, 1200.0, 300.0)];
+        run_s(&mut w, 120.0, 1.0, &surfaces);
+        let win = w.pile_mean_height(5).unwrap();
+        let gr = w.pile_mean_height(GROUND_ID).unwrap();
+        assert!(win > 0.0 && gr > 0.0, "{win} {gr}");
+        assert!(win < gr);
+        assert!(win <= WINDOW_CAP);
+    }
+
+    #[test]
+    fn only_near_flakes_land_on_windows() {
+        let mut w = World::new(3);
+        let surfaces = [window(5, 0.0, SW, 500.0)];
+        run_s(&mut w, 60.0, 1.0, &surfaces);
+        // Far and mid flakes pass the window edge and are still falling below it.
+        assert!(w.flakes.list.iter().any(|f| f.layer != Layer::Near && f.y > 520.0));
+        assert!(w.pile_mean_height(5).unwrap() > 0.0);
+    }
+
+    #[test]
+    fn window_top_never_exceeds_cap() {
+        let mut w = World::new(4);
+        let surfaces = [window(5, 400.0, 1200.0, 300.0)];
+        step_s(&mut w, DT, 1.0, &surfaces);
+        w.surfaces.piles[0].map.fill(WINDOW_CAP);
+        run_s(&mut w, 60.0, 1.0, &surfaces);
+        assert!(max_height(pile_of(&w, 5)) <= WINDOW_CAP + 1e-3);
+    }
+
+    #[test]
+    fn window_snow_slides_off_the_ends() {
+        let mut w = World::new(4);
+        let surfaces = [window(5, 400.0, 1200.0, 300.0)];
+        step_s(&mut w, DT, 0.01, &surfaces);
+        w.surfaces.piles[0].map.fill(WINDOW_CAP);
+        let before = w.flake_count();
+        run_s(&mut w, 5.0, 0.01, &surfaces);
+        let m = pile_of(&w, 5);
+        assert!(m.col_height(0) <= WINDOW_EDGE_MAX + 1e-3, "{}", m.col_height(0));
+        assert!(m.col_height(m.len() - 1) <= WINDOW_EDGE_MAX + 1e-3);
+        assert!(m.height_at(800.0) > 20.0, "middle keeps its snow");
+        assert!(w.flake_count() > before, "excess leaves as falling flakes");
+    }
+
+    #[test]
+    fn ground_never_exceeds_cap() {
+        let mut w = World::new(5);
+        let surfaces = [ground(SW, 1040.0)];
+        step_s(&mut w, DT, 1.0, &surfaces);
+        w.fill_ground(GROUND_CAP - 0.5);
+        run_s(&mut w, 60.0, 1.0, &surfaces);
+        assert!(max_height(w.ground().unwrap()) <= GROUND_CAP + 1e-3);
+    }
+
+    #[test]
+    fn moving_window_shakes_snow_off() {
+        let mut w = World::new(6);
+        step_s(&mut w, DT, 0.01, &[window(5, 400.0, 1200.0, 300.0)]);
+        w.surfaces.piles[0].map.fill(10.0);
+        let before = w.flake_count();
+        step_s(&mut w, DT, 0.01, &[window(5, 450.0, 1250.0, 300.0)]);
+        assert_eq!(w.pile_mean_height(5), Some(0.0));
+        assert!(w.flake_count() > before + 50);
+    }
+
+    #[test]
+    fn closing_window_shakes_snow_off() {
+        let mut w = World::new(6);
+        step_s(&mut w, DT, 0.01, &[window(5, 400.0, 1200.0, 300.0)]);
+        w.surfaces.piles[0].map.fill(10.0);
+        let before = w.flake_count();
+        step_s(&mut w, DT, 0.01, &[]);
+        assert_eq!(w.pile_mean_height(5), None);
+        assert!(w.flake_count() > before + 50);
+    }
+
+    #[test]
+    fn shake_off_is_bounded_per_step() {
+        let mut w = World::new(6);
+        step_s(&mut w, DT, 0.01, &[window(5, 0.0, SW, 300.0)]);
+        w.surfaces.piles[0].map.fill(WINDOW_CAP);
+        let before = w.flake_count();
+        step_s(&mut w, DT, 0.01, &[]);
+        assert!(w.flake_count() <= before + SHED_MAX + 2);
+    }
+
+    #[test]
+    fn covered_columns_shake_off() {
+        let mut w = World::new(7);
+        step_s(&mut w, DT, 0.01, &[window(5, 400.0, 1200.0, 300.0)]);
+        w.surfaces.piles[0].map.fill(10.0);
+        let mut half = window(5, 400.0, 1200.0, 300.0);
+        half.visible = vec![(400.0, 800.0)];
+        step_s(&mut w, DT, 0.01, &[half]);
+        let m = pile_of(&w, 5);
+        assert_eq!(m.height_at(1000.0), 0.0);
+        assert!(m.height_at(600.0) > 9.0);
+    }
+
+    #[test]
+    fn hidden_part_gets_no_snow() {
+        let mut w = World::new(8);
+        let mut half = window(5, 400.0, 1200.0, 300.0);
+        half.visible = vec![(400.0, 800.0)];
+        run_s(&mut w, 120.0, 1.0, &[half]);
+        let m = pile_of(&w, 5);
+        assert_eq!(m.height_at(1000.0), 0.0);
+        assert!(m.total_area() > 0.0);
+    }
+
+    #[test]
+    fn no_surfaces_is_fine() {
+        let mut w = World::new(9);
+        run_s(&mut w, 40.0, 1.0, &[]);
+        assert!(w.flake_count() > 0);
+        assert!(w.ground().is_none());
+        assert!(w.flakes.list.iter().all(|f| f.y <= SH + f.r));
+    }
+
+    #[test]
+    fn second_ground_is_ignored() {
+        let mut w = World::new(9);
+        let mut other = ground(SW, 900.0);
+        other.id = 77;
+        run_s(&mut w, 30.0, 1.0, &[ground(SW, 1040.0), other]);
+        assert_eq!(w.pile_mean_height(77), None);
+        assert!(w.pile_mean_height(GROUND_ID).unwrap() > 0.0);
+    }
+
+    #[test]
+    fn resolution_change_keeps_ground() {
+        let mut w = World::new(10);
+        run_s(&mut w, 10.0, 1.0, &[ground(1920.0, 1040.0)]);
+        w.fill_ground(12.0);
+        let s = settings(0.5);
+        let small = [ground(1280.0, 680.0)];
+        w.step(&FrameInput { dt: DT, width: 1280.0, height: 720.0, surfaces: &small, settings: &s, pointer: None });
+        let g = w.ground().unwrap();
+        assert_eq!(g.x1(), 1280.0);
+        assert!((g.height_at(600.0) - 12.0).abs() < 0.5);
+        assert!(w.flakes.list.iter().all(|f| f.x <= 1430.0));
+    }
+
+    #[test]
+    fn melts_only_when_off() {
+        let mut w = World::new(11);
+        let surfaces = [ground(SW, 1040.0)];
+        step_s(&mut w, DT, 0.0, &surfaces);
+        w.fill_ground(5.0);
+        run_s(&mut w, 10.0, 0.0, &surfaces);
+        let melted = w.pile_mean_height(GROUND_ID).unwrap();
+        assert!((melted - (5.0 - 10.0 * MELT_RATE)).abs() < 0.1, "{melted}");
+
+        let mut w = World::new(11);
+        step_s(&mut w, DT, 0.5, &surfaces);
+        w.fill_ground(5.0);
+        run_s(&mut w, 10.0, 0.5, &surfaces);
+        assert!(w.pile_mean_height(GROUND_ID).unwrap() >= 5.0);
+    }
+
+    #[test]
+    fn not_idle_while_piles_melt() {
+        let mut w = World::new(12);
+        let surfaces = [ground(SW, 1040.0)];
+        step_s(&mut w, DT, 0.0, &surfaces);
+        w.fill_ground(1.0);
+        assert!(!step_s(&mut w, DT, 0.0, &surfaces).idle);
+        run_s(&mut w, 10.0, 0.0, &surfaces);
+        assert!(step_s(&mut w, DT, 0.0, &surfaces).idle);
+    }
+
+    #[test]
+    fn clear_snow_empties_piles() {
+        let mut w = World::new(13);
+        let surfaces = [ground(SW, 1040.0), window(5, 400.0, 1200.0, 300.0)];
+        step_s(&mut w, DT, 0.5, &surfaces);
+        w.fill_ground(20.0);
+        w.surfaces.piles[1].map.fill(10.0);
+        w.clear_snow();
+        assert_eq!(w.pile_mean_height(GROUND_ID), Some(0.0));
+        assert_eq!(w.pile_mean_height(5), Some(0.0));
+    }
+
+    #[test]
+    fn piles_are_drawn_between_mid_and_near_flakes() {
+        let mut w = World::new(14);
+        let surfaces = [ground(SW, 1040.0)];
+        run_s(&mut w, 20.0, 1.0, &surfaces);
+        let mut out = Vec::new();
+        w.draw(&mut out);
+        let poly = out.iter().position(|p| matches!(p, Prim::Polygon { .. })).expect("pile polygon");
+        assert!(out[..poly].iter().all(|p| matches!(p, Prim::Circle { r, .. } if *r <= 2.5)));
+        assert!(out[poly + 1..].iter().all(|p| matches!(p, Prim::Circle { r, .. } if *r >= 2.5)));
+    }
+
+    #[test]
+    fn edge_trickle_matches_snow_lost() {
+        let mut w = World::new(4);
+        let surfaces = [window(5, 400.0, 1200.0, 300.0)];
+        step_s(&mut w, DT, 0.0, &surfaces);
+        w.surfaces.piles[0].map.fill(WINDOW_CAP);
+        let before = pile_of(&w, 5).total_area();
+        // Intensity 0 would melt; hold the pile with a whisper of snow that cannot reach it in time.
+        for _ in 0..120 {
+            step_s(&mut w, DT, 0.001, &surfaces);
+        }
+        let lost = before - pile_of(&w, 5).total_area();
+        assert!(lost > 0.0);
+        let shed_area = w.shed_count as f32 * DEPOSIT_AREA;
+        assert!(shed_area <= lost + 2.0 * DEPOSIT_AREA, "shed {shed_area} px² of flakes for {lost} px² of snow");
+        assert!(shed_area >= lost - 2.0 * DEPOSIT_AREA, "shed {shed_area} px² of flakes for {lost} px² of snow");
     }
 }
