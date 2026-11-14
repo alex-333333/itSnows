@@ -3,6 +3,7 @@
 use crate::blower::{self, Blower, Particle};
 pub use crate::blower::{BLOWER_COOLDOWN, BLOWER_H, BLOWER_REMOVE, BLOWER_SPEED, BLOWER_TRIGGER, BLOWER_W};
 use crate::flakes::{Flake, Flakes, Layer};
+use crate::lights::{self, MIN_GARLAND};
 use crate::pile::HeightMap;
 use crate::prim::{Prim, Rgba};
 use crate::rng::Rng;
@@ -97,6 +98,8 @@ pub struct World {
     blower_requested: bool,
     blower_cooldown: f32,
     spray: Vec<Particle>,
+    lights_mode: LightsMode,
+    lights_pattern: LightsPattern,
 }
 
 fn sanitize_dt(dt: f32) -> f32 {
@@ -111,12 +114,14 @@ impl World {
     pub fn new(seed: u64) -> Self {
         let mut rng = Rng::new(seed);
         let flakes = Flakes::new(&mut rng);
-        Self { rng, t: 0.0, width: 0.0, height: 0.0, flakes, surfaces: Surfaces::default(), shed: Vec::new(), shed_count: 0, blower: None, blower_requested: false, blower_cooldown: 0.0, spray: Vec::new() }
+        Self { rng, t: 0.0, width: 0.0, height: 0.0, flakes, surfaces: Surfaces::default(), shed: Vec::new(), shed_count: 0, blower: None, blower_requested: false, blower_cooldown: 0.0, spray: Vec::new(), lights_mode: LightsMode::Off, lights_pattern: LightsPattern::Steady }
     }
 
     pub fn step(&mut self, input: &FrameInput) -> StepOutput {
         let dt = sanitize_dt(input.dt);
         let (w, h) = (input.width, input.height);
+        self.lights_mode = input.settings.lights_mode;
+        self.lights_pattern = input.settings.lights_pattern;
         if !(w > 0.0 && h > 0.0) || !w.is_finite() || !h.is_finite() {
             self.width = 0.0;
             self.height = 0.0;
@@ -144,7 +149,8 @@ impl World {
             && self.flakes.list.is_empty()
             && self.surfaces.all_empty()
             && self.blower.is_none()
-            && self.spray.is_empty();
+            && self.spray.is_empty()
+            && !self.lights_animating();
         StepOutput { idle, exit_play: false }
     }
 
@@ -179,6 +185,25 @@ impl World {
             }
             true
         });
+    }
+
+    fn lights_animating(&self) -> bool {
+        self.lights_mode != LightsMode::Off && self.lights_pattern != LightsPattern::Steady
+    }
+
+    fn draw_lights(&self, out: &mut Vec<Prim>) {
+        match self.lights_mode {
+            LightsMode::Off => {}
+            LightsMode::ScreenTop => lights::draw_garland(0.0, self.width, 6.0, self.lights_pattern, self.t, out),
+            LightsMode::Windows => {
+                for pile in self.surfaces.piles.iter().filter(|p| p.kind == SurfaceKind::WindowTop) {
+                    for &(a, b) in pile.visible.iter().filter(|(a, b)| b - a >= MIN_GARLAND) {
+                        // Just below the top edge, over the title bar.
+                        lights::draw_garland(a, b, pile.y + 4.0, self.lights_pattern, self.t, out);
+                    }
+                }
+            }
+        }
     }
 
     fn step_blower(&mut self, dt: f32) {
@@ -264,6 +289,7 @@ impl World {
         }
         blower::draw_spray(&self.spray, out);
         self.draw_flakes(out, Layer::Near);
+        self.draw_lights(out);
     }
 
     fn draw_flakes(&self, out: &mut Vec<Prim>, layer: Layer) {
@@ -838,5 +864,81 @@ mod tests {
             t += DT;
         }
         assert!(!w.blower_active(), "blower must still leave after the screen shrinks");
+    }
+
+    // ---- lights ----
+
+    fn lit(mode: LightsMode, pattern: LightsPattern, intensity: f32) -> Settings {
+        Settings { intensity, lights_mode: mode, lights_pattern: pattern }
+    }
+
+    fn draw_with(world: &mut World, s: &Settings, surfaces: &[SurfaceIn]) -> (Vec<Prim>, StepOutput) {
+        let out = world.step(&FrameInput { dt: DT, width: SW, height: SH, surfaces, settings: s, pointer: None });
+        let mut prims = Vec::new();
+        world.draw(&mut prims);
+        (prims, out)
+    }
+
+    fn glows(prims: &[Prim]) -> Vec<(f32, f32)> {
+        prims.iter().filter_map(|p| if let Prim::Glow { x, y, .. } = p { Some((*x, *y)) } else { None }).collect()
+    }
+
+    #[test]
+    fn off_draws_no_lights() {
+        let mut w = World::new(31);
+        let (prims, _) = draw_with(&mut w, &lit(LightsMode::Off, LightsPattern::Twinkle, 0.0), &[window(5, 400.0, 1200.0, 300.0)]);
+        assert!(glows(&prims).is_empty());
+    }
+
+    #[test]
+    fn screen_top_spans_width() {
+        let mut w = World::new(31);
+        let (prims, _) = draw_with(&mut w, &lit(LightsMode::ScreenTop, LightsPattern::Steady, 0.0), &[]);
+        let g = glows(&prims);
+        assert!(g.len() > 60);
+        assert!(g.iter().all(|(_, y)| *y < 30.0));
+        assert!(g.iter().any(|(x, _)| *x < 40.0) && g.iter().any(|(x, _)| *x > SW - 40.0));
+    }
+
+    #[test]
+    fn windows_mode_skips_narrow() {
+        let mut w = World::new(31);
+        let s = lit(LightsMode::Windows, LightsPattern::Steady, 0.0);
+        let (prims, _) = draw_with(&mut w, &s, &[window(5, 400.0, 500.0, 300.0)]);
+        assert!(glows(&prims).is_empty());
+        let (prims, _) = draw_with(&mut w, &s, &[window(6, 400.0, 800.0, 300.0)]);
+        let g = glows(&prims);
+        assert!(!g.is_empty());
+        assert!(g.iter().all(|(x, y)| *x >= 400.0 && *x <= 800.0 && *y >= 300.0 && *y <= 320.0));
+    }
+
+    #[test]
+    fn windows_mode_follows_visible_stretches() {
+        let mut w = World::new(31);
+        let mut split = window(5, 0.0, 1000.0, 300.0);
+        split.visible = vec![(0.0, 300.0), (700.0, 1000.0)];
+        let (prims, _) = draw_with(&mut w, &lit(LightsMode::Windows, LightsPattern::Steady, 0.0), &[split]);
+        let g = glows(&prims);
+        assert!(!g.is_empty());
+        assert!(g.iter().all(|(x, _)| *x <= 300.0 || *x >= 700.0));
+    }
+
+    #[test]
+    fn lights_are_drawn_last() {
+        let mut w = World::new(31);
+        run_s(&mut w, 5.0, 1.0, &[]);
+        let (prims, _) = draw_with(&mut w, &lit(LightsMode::ScreenTop, LightsPattern::Steady, 1.0), &[]);
+        let first_glow = prims.iter().position(|p| matches!(p, Prim::Glow { .. })).unwrap();
+        // After the first bulb there are only light parts: no flakes on top of the garland.
+        assert!(prims[first_glow..].iter().all(|p| !matches!(p, Prim::Circle { color, .. } if *color == Rgba::WHITE)));
+    }
+
+    #[test]
+    fn steady_lights_are_idle_animated_lights_are_not() {
+        let mut w = World::new(31);
+        assert!(draw_with(&mut w, &lit(LightsMode::ScreenTop, LightsPattern::Steady, 0.0), &[]).1.idle);
+        assert!(!draw_with(&mut w, &lit(LightsMode::ScreenTop, LightsPattern::Twinkle, 0.0), &[]).1.idle);
+        assert!(!draw_with(&mut w, &lit(LightsMode::ScreenTop, LightsPattern::Chase, 0.0), &[]).1.idle);
+        assert!(draw_with(&mut w, &lit(LightsMode::Off, LightsPattern::Chase, 0.0), &[]).1.idle);
     }
 }

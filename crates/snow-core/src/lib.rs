@@ -3,6 +3,7 @@
 
 pub mod blower;
 pub mod flakes;
+pub mod lights;
 pub mod occlusion;
 pub mod pile;
 pub mod prim;

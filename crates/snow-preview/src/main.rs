@@ -132,6 +132,20 @@ fn scene_blower(out: PathBuf) {
     s.shoot();
 }
 
+fn scene_lights(out: PathBuf) {
+    let mut s = Sim::new("lights", out, 1280.0, 720.0, 0.5);
+    s.desktop(&[win(10, 520.0, 300.0, 1000.0, 620.0), win(11, 120.0, 180.0, 760.0, 560.0)]);
+    s.settings.lights_mode = LightsMode::Windows;
+    s.run(60.0);
+    s.shoot();
+    s.run(0.5);
+    s.shoot();
+    s.settings.lights_mode = LightsMode::ScreenTop;
+    s.settings.lights_pattern = LightsPattern::Chase;
+    s.run(0.5);
+    s.shoot();
+}
+
 fn scene_snow(out: PathBuf) {
     let mut s = Sim::new("snow", out, 1280.0, 720.0, 0.5);
     for secs in [5.0, 10.0, 15.0] {
@@ -148,8 +162,9 @@ fn main() {
         "snow" => scene_snow(out),
         "piles" => scene_piles(out),
         "blower" => scene_blower(out),
+        "lights" => scene_lights(out),
         _ => {
-            eprintln!("usage: snow-preview <scene> [out_dir]\nscenes: snow piles blower");
+            eprintln!("usage: snow-preview <scene> [out_dir]\nscenes: snow piles blower lights");
             std::process::exit(2);
         }
     }

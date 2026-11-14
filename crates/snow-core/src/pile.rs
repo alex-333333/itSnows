@@ -166,7 +166,12 @@ impl HeightMap {
         }
         let mut pts = Vec::with_capacity(self.cols.len() + 2);
         pts.push((self.x0, base_y));
-        for (i, h) in self.cols.iter().enumerate() {
+        // Draw a moving average: single flakes landing make the raw columns
+        // jagged, and snow should look soft.
+        let n = self.cols.len();
+        for i in 0..n {
+            let window = &self.cols[i.saturating_sub(2)..(i + 3).min(n)];
+            let h = window.iter().sum::<f32>() / window.len() as f32;
             pts.push((self.col_x(i).min(self.x1), base_y - h));
         }
         pts.push((self.x1, base_y));
@@ -306,6 +311,14 @@ mod tests {
     #[test]
     fn outline_empty_when_no_snow() {
         assert!(HeightMap::new(0.0, 40.0, 24.0).outline(100.0).is_empty());
+    }
+
+    #[test]
+    fn outline_softens_single_column_spikes() {
+        let mut m = uniform(0.0, 80.0, 24.0, 2.0);
+        m.deposit(41.0, 12.0);
+        let top = m.outline(100.0).iter().map(|p| p.1).fold(f32::MAX, f32::min);
+        assert!(top > 100.0 - 5.0 && top < 100.0 - 2.0, "{top}");
     }
 
     #[test]
