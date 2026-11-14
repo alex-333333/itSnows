@@ -1,34 +1,195 @@
-//! The frame loop: pump messages, step the world, draw.
+//! The frame loop: pump messages, react to tray and hotkeys, step the world, draw.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use snow_core::{FrameInput, LightsMode, LightsPattern, Prim, Settings, World};
+use snow_core::{FrameInput, Prim, World};
 use windows::core::w;
 use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
 use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
+use crate::config::AppSettings;
 use crate::gfx::Gfx;
 use crate::overlay::{self, Event, Overlay};
+use crate::tray::{Command, MenuState, Tray};
+use crate::{hotkeys, system};
+
+const FULLSCREEN_POLL: Duration = Duration::from_secs(1);
+const BATTERY_POLL: Duration = Duration::from_secs(10);
+const TOPMOST_POLL: Duration = Duration::from_secs(2);
+/// How long to sleep between checks while nothing needs drawing.
+const IDLE_WAIT_MS: u32 = 250;
 
 fn seed() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(1)
 }
 
-/// Dispatch pending window messages. Returns false once the app should quit.
-fn pump() -> bool {
+fn load_settings() -> AppSettings {
+    system::settings_path().and_then(|p| std::fs::read_to_string(p).ok()).map(|t| AppSettings::parse(&t)).unwrap_or_default()
+}
+
+fn save_settings(settings: &AppSettings) {
+    if let Some(path) = system::settings_path() {
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(path, settings.to_json());
+    }
+}
+
+/// Sleep until a message arrives or `ms` pass.
+fn wait(ms: u32) {
     unsafe {
-        let mut msg = MSG::default();
-        while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
-            if msg.message == WM_QUIT {
-                return false;
+        MsgWaitForMultipleObjects(None, false, ms, QS_ALLINPUT);
+    }
+}
+
+struct App {
+    overlay: Overlay,
+    tray: Tray,
+    gfx: Option<Gfx>,
+    world: World,
+    settings: AppSettings,
+    play: bool,
+    locked: bool,
+    fullscreen: bool,
+    on_battery: bool,
+    quit: bool,
+}
+
+impl App {
+    /// The overlay is hidden and the simulation frozen.
+    fn hidden(&self) -> bool {
+        self.settings.paused || self.locked || self.fullscreen
+    }
+
+    fn apply_visibility(&mut self) {
+        let hidden = self.hidden();
+        if hidden {
+            self.set_play(false);
+        }
+        self.overlay.set_visible(!hidden);
+    }
+
+    fn set_play(&mut self, on: bool) {
+        let on = on && !self.hidden();
+        if on == self.play {
+            return;
+        }
+        self.play = on;
+        self.overlay.set_click_through(!on);
+        hotkeys::set_escape(on);
+    }
+
+    fn changed(&mut self) {
+        save_settings(&self.settings);
+    }
+
+    fn command(&mut self, command: Command) {
+        match command {
+            Command::SetIntensity(v) => {
+                self.settings.intensity = v;
+                self.changed();
             }
-            let _ = TranslateMessage(&msg);
-            DispatchMessageW(&msg);
+            Command::LightsMode(mode) => {
+                self.settings.lights_mode = mode.to_string();
+                self.changed();
+            }
+            Command::NextPattern => {
+                self.settings.next_pattern();
+                self.changed();
+            }
+            Command::CallBlower => {}
+            Command::ClearSnow => {}
+            Command::TogglePlay => self.set_play(!self.play),
+            Command::ToggleCapture => {
+                self.settings.show_in_capture = !self.settings.show_in_capture;
+                self.overlay.set_capture_excluded(!self.settings.show_in_capture);
+                self.changed();
+            }
+            Command::ToggleAutostart => system::set_autostart(!system::autostart_enabled()),
+            Command::TogglePause => {
+                self.settings.paused = !self.settings.paused;
+                self.apply_visibility();
+                self.changed();
+            }
+            Command::Exit => self.quit = true,
         }
     }
-    true
+
+    fn hotkey(&mut self, id: i32) {
+        match id {
+            hotkeys::PLAY => self.set_play(!self.play),
+            hotkeys::ESCAPE => self.set_play(false),
+            hotkeys::UP => {
+                self.settings.step_intensity(0.1);
+                self.changed();
+            }
+            hotkeys::DOWN => {
+                self.settings.step_intensity(-0.1);
+                self.changed();
+            }
+            hotkeys::PAUSE => self.command(Command::TogglePause),
+            _ => {}
+        }
+    }
+
+    fn event(&mut self, event: Event) {
+        match event {
+            Event::DisplayChange => {
+                self.overlay.refit();
+                self.gfx = None;
+            }
+            Event::TrayClick => {
+                let state = MenuState { settings: &self.settings, play: self.play, autostart: system::autostart_enabled() };
+                if let Some(command) = self.tray.show_menu(&state) {
+                    self.command(command);
+                }
+            }
+            Event::TaskbarCreated => self.tray.add(),
+            Event::SessionLocked(locked) => {
+                self.locked = locked;
+                self.apply_visibility();
+            }
+        }
+    }
+
+    /// Dispatch pending window messages. Returns false once the app should quit.
+    fn pump(&mut self) -> bool {
+        unsafe {
+            let mut msg = MSG::default();
+            while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+                match msg.message {
+                    WM_QUIT => return false,
+                    WM_HOTKEY => self.hotkey(msg.wParam.0 as i32),
+                    _ => {
+                        let _ = TranslateMessage(&msg);
+                        DispatchMessageW(&msg);
+                    }
+                }
+            }
+        }
+        for event in overlay::drain_events() {
+            self.event(event);
+        }
+        !self.quit
+    }
+
+    /// Draw one frame. On failure the device is dropped and rebuilt next time.
+    fn render(&mut self, prims: &[Prim]) {
+        if self.gfx.is_none() {
+            self.gfx = Gfx::new(self.overlay.hwnd, self.overlay.width, self.overlay.height).ok();
+        }
+        let sync_interval = if self.on_battery { 2 } else { 1 };
+        match self.gfx.as_mut().map(|g| g.render(prims, sync_interval)) {
+            Some(Ok(())) => {}
+            _ => {
+                self.gfx = None;
+                wait(500);
+            }
+        }
+    }
 }
 
 pub fn run() {
@@ -39,52 +200,95 @@ pub fn run() {
             return;
         }
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    }
 
-        let Ok(mut overlay) = Overlay::create() else { return };
-        let mut gfx = Gfx::new(overlay.hwnd, overlay.width, overlay.height).ok();
+    let Ok(overlay) = Overlay::create() else { return };
+    let Ok(tray) = Tray::create() else { return };
+    overlay::set_taskbar_created_message(tray.taskbar_created);
+    system::watch_session(tray.hwnd);
+    hotkeys::register_all();
 
-        let mut world = World::new(seed());
-        let settings = Settings { intensity: 0.5, lights_mode: LightsMode::Off, lights_pattern: LightsPattern::Twinkle };
-        let mut prims: Vec<Prim> = Vec::new();
-        let mut last = Instant::now();
+    let mut app = App {
+        overlay,
+        tray,
+        gfx: None,
+        world: World::new(seed()),
+        settings: load_settings(),
+        play: false,
+        locked: false,
+        fullscreen: system::fullscreen_app_active(),
+        on_battery: system::on_battery(),
+        quit: false,
+    };
+    app.overlay.set_capture_excluded(!app.settings.show_in_capture);
+    app.apply_visibility();
 
-        while pump() {
-            for event in overlay::drain_events() {
-                match event {
-                    Event::DisplayChange => {
-                        overlay.refit();
-                        gfx = None;
-                    }
-                }
-            }
+    let mut prims: Vec<Prim> = Vec::new();
+    let mut last = Instant::now();
+    let mut fullscreen_checked = last;
+    let mut battery_checked = last;
+    let mut topmost_checked = last;
+    let mut idle_frame_shown = false;
 
-            let now = Instant::now();
-            let dt = (now - last).as_secs_f32();
-            last = now;
-
-            world.step(&FrameInput {
-                dt,
-                width: overlay.width as f32,
-                height: overlay.height as f32,
-                surfaces: &[],
-                settings: &settings,
-                pointer: None,
-            });
-            prims.clear();
-            world.draw(&mut prims);
-
-            if gfx.is_none() {
-                gfx = Gfx::new(overlay.hwnd, overlay.width, overlay.height).ok();
-            }
-            match gfx.as_mut().map(|g| g.render(&prims, 1)) {
-                Some(Ok(())) => {}
-                // Device lost, or no device yet: drop it and retry shortly
-                // rather than spinning.
-                _ => {
-                    gfx = None;
-                    std::thread::sleep(std::time::Duration::from_millis(500));
-                }
+    while app.pump() {
+        let now = Instant::now();
+        if now - fullscreen_checked >= FULLSCREEN_POLL {
+            fullscreen_checked = now;
+            let fullscreen = system::fullscreen_app_active();
+            if fullscreen != app.fullscreen {
+                app.fullscreen = fullscreen;
+                app.apply_visibility();
             }
         }
+        if now - battery_checked >= BATTERY_POLL {
+            battery_checked = now;
+            app.on_battery = system::on_battery();
+        }
+
+        if app.hidden() {
+            last = now;
+            wait(IDLE_WAIT_MS);
+            continue;
+        }
+
+        if now - topmost_checked >= TOPMOST_POLL {
+            topmost_checked = now;
+            // Stay above the taskbar, which is top-most too.
+            unsafe {
+                let _ = SetWindowPos(app.overlay.hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            }
+        }
+
+        let dt = (now - last).as_secs_f32();
+        last = now;
+        let core_settings = app.settings.to_core();
+        let out = app.world.step(&FrameInput {
+            dt,
+            width: app.overlay.width as f32,
+            height: app.overlay.height as f32,
+            surfaces: &[],
+            settings: &core_settings,
+            pointer: None,
+        });
+        if out.exit_play {
+            app.set_play(false);
+        }
+
+        if out.idle {
+            // Nothing is moving: show one empty frame, then stop drawing.
+            if !idle_frame_shown {
+                app.render(&[]);
+                idle_frame_shown = true;
+            }
+            wait(IDLE_WAIT_MS);
+            continue;
+        }
+        idle_frame_shown = false;
+
+        prims.clear();
+        app.world.draw(&mut prims);
+        app.render(&prims);
     }
+
+    hotkeys::unregister_all();
 }

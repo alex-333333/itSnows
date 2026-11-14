@@ -5,6 +5,7 @@ edition.workspace = true
 publish = false
 
 [dependencies]
+serde_json = "1.0.154"
 snow-core = { path = "../snow-core" }
 
 [target.'cfg(windows)'.dependencies]

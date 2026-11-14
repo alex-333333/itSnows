@@ -12,6 +12,11 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Event {
     DisplayChange,
+    /// The tray icon was clicked.
+    TrayClick,
+    /// Explorer restarted; the tray icon is gone and must be re-added.
+    TaskbarCreated,
+    SessionLocked(bool),
 }
 
 thread_local! {
@@ -75,6 +80,7 @@ impl Overlay {
                 Some(instance.into()),
                 None,
             )?;
+            OVERLAY.with(|c| c.set(hwnd.0 as isize));
             // A layered window is only composed once its attributes are set.
             SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA)?;
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
@@ -118,15 +124,51 @@ impl Overlay {
     }
 }
 
-unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+thread_local! {
+    static TASKBAR_CREATED: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    static OVERLAY: std::cell::Cell<isize> = const { std::cell::Cell::new(0) };
+}
+
+/// Tell the window procedure which message id Explorer broadcasts on restart.
+pub fn set_taskbar_created_message(id: u32) {
+    TASKBAR_CREATED.with(|c| c.set(id));
+}
+
+const WTS_SESSION_LOCK: usize = 7;
+const WTS_SESSION_UNLOCK: usize = 8;
+
+/// Shared by the overlay and the tray helper window.
+pub unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    if msg != 0 && msg == TASKBAR_CREATED.with(|c| c.get()) {
+        push_event(Event::TaskbarCreated);
+        return LRESULT(0);
+    }
     match msg {
+        crate::tray::WM_TRAY => {
+            let mouse = lparam.0 as u32 & 0xFFFF;
+            if mouse == WM_RBUTTONUP || mouse == WM_LBUTTONUP {
+                push_event(Event::TrayClick);
+            }
+            LRESULT(0)
+        }
+        WM_WTSSESSION_CHANGE => {
+            match wparam.0 {
+                WTS_SESSION_LOCK => push_event(Event::SessionLocked(true)),
+                WTS_SESSION_UNLOCK => push_event(Event::SessionLocked(false)),
+                _ => {}
+            }
+            LRESULT(0)
+        }
         WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
         WM_DISPLAYCHANGE => {
             push_event(Event::DisplayChange);
             LRESULT(0)
         }
         WM_DESTROY => {
-            PostQuitMessage(0);
+            // Only the overlay going away ends the app.
+            if OVERLAY.with(|c| c.get()) == hwnd.0 as isize {
+                PostQuitMessage(0);
+            }
             LRESULT(0)
         }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
