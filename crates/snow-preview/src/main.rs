@@ -115,6 +115,23 @@ fn scene_piles(out: PathBuf) {
     s.shoot();
 }
 
+fn scene_blower(out: PathBuf) {
+    let mut s = Sim::new("blower", out, 1280.0, 720.0, 1.0);
+    s.desktop(&[win(11, 200.0, 180.0, 760.0, 500.0)]);
+    // Snow until the blower comes out by itself.
+    let mut waited = 0.0;
+    while !s.world.blower_active() && waited < 1200.0 {
+        s.run(1.0);
+        waited += 1.0;
+    }
+    println!("blower appeared after {waited} s of blizzard");
+    s.shoot();
+    s.run(3.5);
+    s.shoot();
+    s.run(8.0);
+    s.shoot();
+}
+
 fn scene_snow(out: PathBuf) {
     let mut s = Sim::new("snow", out, 1280.0, 720.0, 0.5);
     for secs in [5.0, 10.0, 15.0] {
@@ -130,8 +147,9 @@ fn main() {
     match scene.as_str() {
         "snow" => scene_snow(out),
         "piles" => scene_piles(out),
+        "blower" => scene_blower(out),
         _ => {
-            eprintln!("usage: snow-preview <scene> [out_dir]\nscenes: snow piles");
+            eprintln!("usage: snow-preview <scene> [out_dir]\nscenes: snow piles blower");
             std::process::exit(2);
         }
     }

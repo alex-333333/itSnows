@@ -1,5 +1,7 @@
 //! The world: owns all simulation state, steps it, and emits a draw list.
 
+use crate::blower::{self, Blower, Particle};
+pub use crate::blower::{BLOWER_COOLDOWN, BLOWER_H, BLOWER_REMOVE, BLOWER_SPEED, BLOWER_TRIGGER, BLOWER_W};
 use crate::flakes::{Flake, Flakes, Layer};
 use crate::pile::HeightMap;
 use crate::prim::{Prim, Rgba};
@@ -91,6 +93,10 @@ pub struct World {
     shed: Vec<Shed>,
     /// Flakes spawned from snow that came loose, in total.
     shed_count: u64,
+    blower: Option<Blower>,
+    blower_requested: bool,
+    blower_cooldown: f32,
+    spray: Vec<Particle>,
 }
 
 fn sanitize_dt(dt: f32) -> f32 {
@@ -105,7 +111,7 @@ impl World {
     pub fn new(seed: u64) -> Self {
         let mut rng = Rng::new(seed);
         let flakes = Flakes::new(&mut rng);
-        Self { rng, t: 0.0, width: 0.0, height: 0.0, flakes, surfaces: Surfaces::default(), shed: Vec::new(), shed_count: 0 }
+        Self { rng, t: 0.0, width: 0.0, height: 0.0, flakes, surfaces: Surfaces::default(), shed: Vec::new(), shed_count: 0, blower: None, blower_requested: false, blower_cooldown: 0.0, spray: Vec::new() }
     }
 
     pub fn step(&mut self, input: &FrameInput) -> StepOutput {
@@ -116,6 +122,9 @@ impl World {
             self.height = 0.0;
             self.flakes.list.clear();
             self.shed.clear();
+            self.blower = None;
+            self.blower_requested = false;
+            self.spray.clear();
             return StepOutput { idle: true, exit_play: false };
         }
         self.width = w;
@@ -127,10 +136,15 @@ impl World {
 
         self.surfaces.reconcile(input.surfaces, &mut self.shed);
         self.land_flakes(dt);
-        self.surfaces.settle(dt, intensity == 0.0, &mut self.shed);
+        self.surfaces.settle(dt, intensity == 0.0, self.blower.is_some(), &mut self.shed);
         self.spawn_shed();
+        self.step_blower(dt);
 
-        let idle = intensity == 0.0 && self.flakes.list.is_empty() && self.surfaces.all_empty();
+        let idle = intensity == 0.0
+            && self.flakes.list.is_empty()
+            && self.surfaces.all_empty()
+            && self.blower.is_none()
+            && self.spray.is_empty();
         StepOutput { idle, exit_play: false }
     }
 
@@ -165,6 +179,40 @@ impl World {
             }
             true
         });
+    }
+
+    fn step_blower(&mut self, dt: f32) {
+        self.blower_cooldown = (self.blower_cooldown - dt).max(0.0);
+        let requested = std::mem::take(&mut self.blower_requested);
+        match self.surfaces.ground_mut() {
+            None => self.blower = None,
+            Some(ground) => {
+                if self.blower.is_none() {
+                    let deep = self.blower_cooldown <= 0.0 && ground.map.mean_height() >= BLOWER_TRIGGER;
+                    if requested || deep {
+                        self.blower = Some(Blower::new(&mut self.rng, ground.map.x0(), ground.map.x1()));
+                    }
+                }
+                if let Some(b) = self.blower.as_mut() {
+                    if b.update(dt, &mut ground.map, ground.y, &mut self.rng, &mut self.spray) {
+                        self.blower = None;
+                        self.blower_cooldown = BLOWER_COOLDOWN;
+                    }
+                }
+            }
+        }
+        blower::update_spray(&mut self.spray, dt, self.width, self.height);
+    }
+
+    /// Summon the snow blower now, however little snow there is. Ignored
+    /// while one is already out or when there is no ground.
+    pub fn call_blower(&mut self) {
+        self.blower_requested = true;
+    }
+
+    /// The vehicle is on its run.
+    pub fn blower_active(&self) -> bool {
+        self.blower.is_some()
     }
 
     /// Turn snow that came loose into falling flakes.
@@ -211,6 +259,10 @@ impl World {
                 out.push(Prim::Polygon { pts, color: SNOW });
             }
         }
+        if let (Some(b), Some(ground)) = (&self.blower, self.surfaces.ground()) {
+            b.draw(ground.y, out);
+        }
+        blower::draw_spray(&self.spray, out);
         self.draw_flakes(out, Layer::Near);
     }
 
@@ -635,5 +687,156 @@ mod tests {
         let shed_area = w.shed_count as f32 * DEPOSIT_AREA;
         assert!(shed_area <= lost + 2.0 * DEPOSIT_AREA, "shed {shed_area} px² of flakes for {lost} px² of snow");
         assert!(shed_area >= lost - 2.0 * DEPOSIT_AREA, "shed {shed_area} px² of flakes for {lost} px² of snow");
+    }
+
+    // ---- snow blower ----
+
+    /// A whisper of snowfall: keeps piles from melting without adding much.
+    const HOLD: f32 = 0.01;
+
+    fn ground_world(h: f32) -> (World, [SurfaceIn; 1]) {
+        let mut w = World::new(21);
+        let surfaces = [ground(SW, 1040.0)];
+        step_s(&mut w, DT, HOLD, &surfaces);
+        w.fill_ground(h);
+        (w, surfaces)
+    }
+
+    fn run_until_blower_done(w: &mut World, surfaces: &[SurfaceIn], max_secs: f32) -> f32 {
+        let mut t = 0.0;
+        while w.blower_active() && t < max_secs {
+            step_s(w, DT, HOLD, surfaces);
+            t += DT;
+        }
+        t
+    }
+
+    #[test]
+    fn triggers_at_threshold() {
+        let (mut w, surfaces) = ground_world(55.0);
+        assert!(!w.blower_active());
+        step_s(&mut w, DT, HOLD, &surfaces);
+        assert!(w.blower_active());
+    }
+
+    #[test]
+    fn does_not_trigger_below() {
+        let (mut w, surfaces) = ground_world(40.0);
+        for _ in 0..600 {
+            step_s(&mut w, DT, HOLD, &surfaces);
+            assert!(!w.blower_active());
+        }
+    }
+
+    #[test]
+    fn removes_about_80_percent() {
+        let (mut w, surfaces) = ground_world(60.0);
+        let before = w.ground().unwrap().total_area();
+        step_s(&mut w, DT, HOLD, &surfaces);
+        assert!(w.blower_active());
+        run_until_blower_done(&mut w, &surfaces, 60.0);
+        let left = w.ground().unwrap().total_area() / before;
+        assert!((0.17..=0.23).contains(&left), "{left}");
+    }
+
+    #[test]
+    fn manual_call_works_when_low() {
+        let (mut w, surfaces) = ground_world(10.0);
+        w.call_blower();
+        step_s(&mut w, DT, HOLD, &surfaces);
+        assert!(w.blower_active());
+        run_until_blower_done(&mut w, &surfaces, 60.0);
+        assert!(w.pile_mean_height(GROUND_ID).unwrap() < 3.0);
+    }
+
+    #[test]
+    fn second_call_while_active_ignored() {
+        let (mut w, surfaces) = ground_world(10.0);
+        w.call_blower();
+        step_s(&mut w, DT, HOLD, &surfaces);
+        run_s(&mut w, 2.0, HOLD, &surfaces);
+        w.call_blower();
+        let t = run_until_blower_done(&mut w, &surfaces, 60.0);
+        // One pass only: done in well under a full crossing from now.
+        assert!(t < (SW + 2.0 * BLOWER_W) / BLOWER_SPEED, "{t}");
+        run_s(&mut w, 1.0, HOLD, &surfaces);
+        assert!(!w.blower_active());
+    }
+
+    #[test]
+    fn no_ground_no_blower() {
+        let mut w = World::new(22);
+        w.call_blower();
+        step_s(&mut w, DT, HOLD, &[]);
+        assert!(!w.blower_active());
+        step_s(&mut w, DT, HOLD, &[ground(SW, 1040.0)]);
+        assert!(!w.blower_active(), "a call made with no ground is dropped, not queued");
+    }
+
+    #[test]
+    fn finishes_and_leaves() {
+        let (mut w, surfaces) = ground_world(10.0);
+        w.call_blower();
+        step_s(&mut w, DT, HOLD, &surfaces);
+        let t = run_until_blower_done(&mut w, &surfaces, 60.0);
+        assert!(t <= (SW + 2.0 * BLOWER_W) / BLOWER_SPEED + 1.0, "{t}");
+        assert!(!w.blower_active());
+    }
+
+    #[test]
+    fn cooldown_blocks_retrigger() {
+        let (mut w, surfaces) = ground_world(60.0);
+        step_s(&mut w, DT, HOLD, &surfaces);
+        run_until_blower_done(&mut w, &surfaces, 60.0);
+        w.fill_ground(60.0);
+        run_s(&mut w, 19.0, HOLD, &surfaces);
+        assert!(!w.blower_active());
+        run_s(&mut w, 2.0, HOLD, &surfaces);
+        assert!(w.blower_active());
+    }
+
+    #[test]
+    fn manual_call_ignores_cooldown() {
+        let (mut w, surfaces) = ground_world(60.0);
+        step_s(&mut w, DT, HOLD, &surfaces);
+        run_until_blower_done(&mut w, &surfaces, 60.0);
+        w.call_blower();
+        step_s(&mut w, DT, HOLD, &surfaces);
+        assert!(w.blower_active());
+    }
+
+    #[test]
+    fn blower_throws_snow_and_is_drawn() {
+        let (mut w, surfaces) = ground_world(60.0);
+        step_s(&mut w, DT, HOLD, &surfaces);
+        run_s(&mut w, 4.0, HOLD, &surfaces);
+        let mut out = Vec::new();
+        w.draw(&mut out);
+        assert!(out.iter().any(|p| matches!(p, Prim::RoundRect { .. })), "blower body");
+        assert!(w.spray.len() > 10, "chute spray");
+    }
+
+    #[test]
+    fn not_idle_while_blower_runs() {
+        let mut w = World::new(23);
+        let surfaces = [ground(SW, 1040.0)];
+        step_s(&mut w, DT, 0.0, &surfaces);
+        w.call_blower();
+        assert!(!step_s(&mut w, DT, 0.0, &surfaces).idle);
+    }
+
+    #[test]
+    fn blower_follows_ground_through_resize() {
+        let (mut w, _) = ground_world(60.0);
+        step_s(&mut w, DT, HOLD, &[ground(SW, 1040.0)]);
+        assert!(w.blower_active());
+        let s = settings(HOLD);
+        let small = [ground(800.0, 560.0)];
+        let mut t = 0.0;
+        while w.blower_active() && t < 60.0 {
+            w.step(&FrameInput { dt: DT, width: 800.0, height: 600.0, surfaces: &small, settings: &s, pointer: None });
+            t += DT;
+        }
+        assert!(!w.blower_active(), "blower must still leave after the screen shrinks");
     }
 }

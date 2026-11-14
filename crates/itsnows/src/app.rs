@@ -101,7 +101,7 @@ impl App {
                 self.settings.next_pattern();
                 self.changed();
             }
-            Command::CallBlower => {}
+            Command::CallBlower => self.world.call_blower(),
             Command::ClearSnow => self.world.clear_snow(),
             Command::TogglePlay => self.set_play(!self.play),
             Command::ToggleCapture => {

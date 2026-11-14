@@ -151,9 +151,15 @@ impl Surfaces {
 
     /// Let piles slump, drop snow from covered or overfull edge columns, and
     /// melt when snowfall is off.
-    pub fn settle(&mut self, dt: f32, melting: bool, out: &mut Vec<Shed>) {
+    ///
+    /// `hold_ground`: leave the ground pile as it is. Set while the blower is
+    /// cutting through it, so the uncleared snow ahead does not slump back
+    /// into the cleared strip behind.
+    pub fn settle(&mut self, dt: f32, melting: bool, hold_ground: bool, out: &mut Vec<Shed>) {
         for pile in &mut self.piles {
-            pile.map.relax(dt);
+            if !(hold_ground && pile.kind == SurfaceKind::Ground) {
+                pile.map.relax(dt);
+            }
             if pile.kind == SurfaceKind::WindowTop {
                 let mut budget = SHED_MAX;
                 let n = pile.map.len();

@@ -1,6 +1,7 @@
 //! itSnows simulation core: pure logic, no OS or graphics dependencies.
 //! Feed it per-frame inputs, get back a draw list.
 
+pub mod blower;
 pub mod flakes;
 pub mod occlusion;
 pub mod pile;
