@@ -1,0 +1,9 @@
+[package]
+name = "snow-preview"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+snow-core = { path = "../snow-core" }
+tiny-skia = "0.12.0"
