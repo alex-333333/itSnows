@@ -7,7 +7,9 @@ use crate::world::{SurfaceIn, SurfaceKind};
 /// Area one landed flake adds to a pile, px².
 pub const DEPOSIT_AREA: f32 = 6.0;
 pub const WINDOW_CAP: f32 = 24.0;
-pub const GROUND_CAP: f32 = 90.0;
+/// Deepest the ground pile gets. Kept low so the snow never hides much of
+/// what sits just above the taskbar.
+pub const GROUND_CAP: f32 = 40.0;
 /// Share of near-layer flakes crossing a window top that land on it.
 pub const WINDOW_LAND_CHANCE: f32 = 0.5;
 /// How fast piles shrink while snowfall is off, px/s.

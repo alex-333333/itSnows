@@ -14,6 +14,7 @@ work.
   full-screen apps and stays out of screen sharing
 
 Windows 10 (1903 or later) and Windows 11, 64-bit. Primary monitor only.
+Hiding from screen sharing needs Windows 10 version 2004 or later.
 
 ## Get it
 
@@ -38,6 +39,7 @@ Click the icon for the menu:
 | Play mode | Lets you grab the snow with the mouse |
 | Show in screen sharing | Off by default: the snow is left out of screen shares and recordings |
 | Start with Windows | Launch at sign-in |
+| Keyboard shortcuts | Untick to give the hotkeys below back to your other apps |
 | Pause | Hide everything until you unpause |
 | Exit | Quit |
 
@@ -49,7 +51,8 @@ Click the icon for the menu:
 | `Ctrl+Alt+P` | Pause |
 
 If another program already uses one of these, that hotkey is skipped; the menu
-still works.
+still works. On keyboard layouts where AltGr+S or AltGr+P types a letter, or
+if your editor uses these combinations, untick **Keyboard shortcuts** in the menu.
 
 ### Play mode
 

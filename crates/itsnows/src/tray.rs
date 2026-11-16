@@ -25,6 +25,7 @@ pub enum Command {
     ToggleCapture,
     ToggleAutostart,
     TogglePause,
+    ToggleHotkeys,
     Exit,
 }
 
@@ -38,6 +39,7 @@ const ID_CAPTURE: usize = 123;
 const ID_AUTOSTART: usize = 124;
 const ID_PAUSE: usize = 125;
 const ID_EXIT: usize = 126;
+const ID_HOTKEYS: usize = 127;
 
 pub struct MenuState<'a> {
     pub settings: &'a AppSettings,
@@ -89,7 +91,9 @@ fn snowflake_pixels() -> Vec<u8> {
 unsafe fn make_icon() -> Result<HICON> {
     let pixels = snowflake_pixels();
     let color = CreateBitmap(32, 32, 1, 32, Some(pixels.as_ptr() as *const _));
-    let mask = CreateBitmap(32, 32, 1, 1, None);
+    // All-zero mask: the colour bitmap's alpha decides what shows.
+    let mask_bits = [0u8; 32 * 32 / 8];
+    let mask = CreateBitmap(32, 32, 1, 1, Some(mask_bits.as_ptr() as *const _));
     let info = ICONINFO { fIcon: true.into(), xHotspot: 0, yHotspot: 0, hbmMask: mask, hbmColor: color };
     let icon = CreateIconIndirect(&info);
     let _ = DeleteObject(color.into());
@@ -183,6 +187,7 @@ impl Tray {
             separator(menu);
             item(menu, ID_CAPTURE, "Show in screen sharing", s.show_in_capture);
             item(menu, ID_AUTOSTART, "Start with Windows", state.autostart);
+            item(menu, ID_HOTKEYS, "Keyboard shortcuts", s.hotkeys);
             item(menu, ID_PAUSE, "Pause\tCtrl+Alt+P", s.paused);
             separator(menu);
             item(menu, ID_EXIT, "Exit", false);
@@ -205,6 +210,7 @@ impl Tray {
                 ID_CAPTURE => Command::ToggleCapture,
                 ID_AUTOSTART => Command::ToggleAutostart,
                 ID_PAUSE => Command::TogglePause,
+                ID_HOTKEYS => Command::ToggleHotkeys,
                 ID_EXIT => Command::Exit,
                 _ => return None,
             })

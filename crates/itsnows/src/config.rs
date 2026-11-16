@@ -18,11 +18,13 @@ pub struct AppSettings {
     pub lights_pattern: String,
     pub show_in_capture: bool,
     pub paused: bool,
+    /// Global hotkeys are registered. Off for people whose keyboard layout or apps need those keys.
+    pub hotkeys: bool,
 }
 
 impl Default for AppSettings {
     fn default() -> Self {
-        Self { intensity: 0.5, lights_mode: "off".into(), lights_pattern: "twinkle".into(), show_in_capture: false, paused: false }
+        Self { intensity: 0.5, lights_mode: "off".into(), lights_pattern: "twinkle".into(), show_in_capture: false, paused: false, hotkeys: true }
     }
 }
 
@@ -51,6 +53,9 @@ impl AppSettings {
         if let Some(v) = map.get("paused").and_then(Value::as_bool) {
             s.paused = v;
         }
+        if let Some(v) = map.get("hotkeys").and_then(Value::as_bool) {
+            s.hotkeys = v;
+        }
         s
     }
 
@@ -61,6 +66,7 @@ impl AppSettings {
             "lights_pattern": self.lights_pattern,
             "show_in_capture": self.show_in_capture,
             "paused": self.paused,
+            "hotkeys": self.hotkeys,
         });
         serde_json::to_string_pretty(&v).unwrap_or_default()
     }
@@ -110,8 +116,16 @@ mod tests {
 
     #[test]
     fn round_trip() {
-        let s = AppSettings { intensity: 0.75, lights_mode: "windows".into(), lights_pattern: "chase".into(), show_in_capture: true, paused: true };
+        let s = AppSettings { intensity: 0.75, lights_mode: "windows".into(), lights_pattern: "chase".into(), show_in_capture: true, paused: true, hotkeys: false };
         assert_eq!(AppSettings::parse(&s.to_json()), s);
+    }
+
+    #[test]
+    fn hotkeys_default_on_and_round_trip() {
+        assert!(AppSettings::default().hotkeys);
+        assert!(AppSettings::parse(r#"{"intensity":0.2}"#).hotkeys, "older files have no such field");
+        let off = AppSettings { hotkeys: false, ..AppSettings::default() };
+        assert!(!AppSettings::parse(&off.to_json()).hotkeys);
     }
 
     #[test]

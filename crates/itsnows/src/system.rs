@@ -8,13 +8,23 @@ use windows::Win32::Foundation::{ERROR_SUCCESS, HWND};
 use windows::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
 use windows::Win32::System::Registry::*;
 use windows::Win32::System::RemoteDesktop::{WTSRegisterSessionNotification, NOTIFY_FOR_THIS_SESSION};
-use windows::Win32::UI::Shell::{SHQueryUserNotificationState, QUNS_BUSY, QUNS_PRESENTATION_MODE, QUNS_RUNNING_D3D_FULL_SCREEN};
+use windows::Win32::UI::Shell::SHQueryUserNotificationState;
+use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
 
-/// A full-screen app, game or presentation is in front.
-pub fn fullscreen_app_active() -> bool {
+/// A full-screen app, game or presentation is in front, or nobody is at the
+/// PC (locked, screensaver, disconnected session).
+pub fn should_hide() -> bool {
     match unsafe { SHQueryUserNotificationState() } {
-        Ok(state) => state == QUNS_BUSY || state == QUNS_RUNNING_D3D_FULL_SCREEN || state == QUNS_PRESENTATION_MODE,
+        Ok(state) => crate::pacing::hides_overlay(state.0),
         Err(_) => false,
+    }
+}
+
+/// Tell the user why the app could not start, instead of vanishing silently.
+pub fn fatal(message: &str) {
+    let text: Vec<u16> = message.encode_utf16().chain(std::iter::once(0)).collect();
+    unsafe {
+        MessageBoxW(None, PCWSTR(text.as_ptr()), w!("itSnows"), MB_OK | MB_ICONERROR);
     }
 }
 

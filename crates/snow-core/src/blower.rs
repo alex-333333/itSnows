@@ -7,7 +7,7 @@ use crate::rng::Rng;
 use crate::surfaces::DEPOSIT_AREA;
 
 /// Mean ground height that summons the blower: 60 % of the ground cap.
-pub const BLOWER_TRIGGER: f32 = 54.0;
+pub const BLOWER_TRIGGER: f32 = 24.0;
 /// Share of the snow it removes from each column it passes.
 pub const BLOWER_REMOVE: f32 = 0.8;
 pub const BLOWER_SPEED: f32 = 160.0;

@@ -51,3 +51,6 @@ These need a real Windows PC; nothing here can be automated from CI.
 - [ ] Settings are remembered after Exit and relaunch
 - [ ] Task Manager at Medium: CPU under about 2 %, memory under about 60 MB
 - [ ] Laptop on battery: still smooth enough (it draws at half rate)
+- [ ] On a 120 Hz or faster display: CPU use is no higher than on a 60 Hz one
+- [ ] Intensity Off, no lights: CPU use drops to about zero
+- [ ] Unticking "Keyboard shortcuts" gives `Ctrl+Alt+S` and friends back to other apps

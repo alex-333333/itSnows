@@ -88,7 +88,8 @@ pub struct StepOutput {
 
 pub struct World {
     rng: Rng,
-    t: f32,
+    /// Seconds simulated so far. f64: the app may run for weeks.
+    t: f64,
     width: f32,
     height: f32,
     flakes: Flakes,
@@ -137,10 +138,10 @@ impl World {
         }
         self.width = w;
         self.height = h;
-        self.t += dt;
+        self.t += dt as f64;
 
         let intensity = if input.settings.intensity.is_finite() { input.settings.intensity.clamp(0.0, 1.0) } else { 0.0 };
-        self.flakes.update(dt, self.t, w, h, intensity, &mut self.rng);
+        self.flakes.update(dt, self.phase_time(), w, h, intensity, &mut self.rng);
 
         self.surfaces.reconcile(input.surfaces, &mut self.shed);
         self.land_flakes(dt);
@@ -192,6 +193,12 @@ impl World {
         });
     }
 
+    /// Time for periodic effects (sway, twinkle), wrapped so it keeps its
+    /// precision as an f32 however long the app runs.
+    fn phase_time(&self) -> f32 {
+        (self.t % 3600.0) as f32
+    }
+
     fn lights_animating(&self) -> bool {
         self.lights_mode != LightsMode::Off && self.lights_pattern != LightsPattern::Steady
     }
@@ -199,12 +206,12 @@ impl World {
     fn draw_lights(&self, out: &mut Vec<Prim>) {
         match self.lights_mode {
             LightsMode::Off => {}
-            LightsMode::ScreenTop => lights::draw_garland(0.0, self.width, 6.0, self.lights_pattern, self.t, out),
+            LightsMode::ScreenTop => lights::draw_garland(0.0, self.width, 6.0, self.lights_pattern, self.phase_time(), out),
             LightsMode::Windows => {
                 for pile in self.surfaces.piles.iter().filter(|p| p.kind == SurfaceKind::WindowTop) {
                     for &(a, b) in pile.visible.iter().filter(|(a, b)| b - a >= MIN_GARLAND) {
                         // Just below the top edge, over the title bar.
-                        lights::draw_garland(a, b, pile.y + 4.0, self.lights_pattern, self.t, out);
+                        lights::draw_garland(a, b, pile.y + 4.0, self.lights_pattern, self.phase_time(), out);
                     }
                 }
             }
@@ -755,7 +762,7 @@ mod tests {
 
     #[test]
     fn triggers_at_threshold() {
-        let (mut w, surfaces) = ground_world(55.0);
+        let (mut w, surfaces) = ground_world(BLOWER_TRIGGER + 1.0);
         assert!(!w.blower_active());
         step_s(&mut w, DT, HOLD, &surfaces);
         assert!(w.blower_active());
@@ -763,7 +770,7 @@ mod tests {
 
     #[test]
     fn does_not_trigger_below() {
-        let (mut w, surfaces) = ground_world(40.0);
+        let (mut w, surfaces) = ground_world(BLOWER_TRIGGER - 8.0);
         for _ in 0..600 {
             step_s(&mut w, DT, HOLD, &surfaces);
             assert!(!w.blower_active());
@@ -772,7 +779,7 @@ mod tests {
 
     #[test]
     fn removes_about_80_percent() {
-        let (mut w, surfaces) = ground_world(60.0);
+        let (mut w, surfaces) = ground_world(30.0);
         let before = w.ground().unwrap().total_area();
         step_s(&mut w, DT, HOLD, &surfaces);
         assert!(w.blower_active());
@@ -827,10 +834,10 @@ mod tests {
 
     #[test]
     fn cooldown_blocks_retrigger() {
-        let (mut w, surfaces) = ground_world(60.0);
+        let (mut w, surfaces) = ground_world(30.0);
         step_s(&mut w, DT, HOLD, &surfaces);
         run_until_blower_done(&mut w, &surfaces, 60.0);
-        w.fill_ground(60.0);
+        w.fill_ground(30.0);
         run_s(&mut w, 19.0, HOLD, &surfaces);
         assert!(!w.blower_active());
         run_s(&mut w, 2.0, HOLD, &surfaces);
@@ -839,7 +846,7 @@ mod tests {
 
     #[test]
     fn manual_call_ignores_cooldown() {
-        let (mut w, surfaces) = ground_world(60.0);
+        let (mut w, surfaces) = ground_world(30.0);
         step_s(&mut w, DT, HOLD, &surfaces);
         run_until_blower_done(&mut w, &surfaces, 60.0);
         w.call_blower();
@@ -849,7 +856,7 @@ mod tests {
 
     #[test]
     fn blower_throws_snow_and_is_drawn() {
-        let (mut w, surfaces) = ground_world(60.0);
+        let (mut w, surfaces) = ground_world(30.0);
         step_s(&mut w, DT, HOLD, &surfaces);
         run_s(&mut w, 4.0, HOLD, &surfaces);
         let mut out = Vec::new();
@@ -869,7 +876,7 @@ mod tests {
 
     #[test]
     fn blower_follows_ground_through_resize() {
-        let (mut w, _) = ground_world(60.0);
+        let (mut w, _) = ground_world(30.0);
         step_s(&mut w, DT, HOLD, &[ground(SW, 1040.0)]);
         assert!(w.blower_active());
         let s = settings(HOLD);
@@ -1061,12 +1068,12 @@ mod tests {
     #[test]
     fn radius_capped() {
         // Deep, but below the depth that would summon the blower.
-        let (mut w, surfaces) = play_world(50.0);
+        let (mut w, surfaces) = play_world(22.0);
         roll(&mut w, &surfaces, 100.0, 1800.0);
         let r = ball_radii(&w);
         assert!((r[0] - BALL_MAX_R).abs() < 0.01, "{r:?}");
         // Past the cap it stops eating snow.
-        assert_eq!(w.ground().unwrap().height_at(1700.0), 50.0);
+        assert_eq!(w.ground().unwrap().height_at(1700.0), 22.0);
     }
 
     #[test]
@@ -1319,5 +1326,46 @@ mod tests {
         step_s(&mut w, DT, HOLD, &[ground(SW, GY - 100.0)]);
         let b = &w.play.stacks[0].balls[0];
         assert!((b.y + b.r - (GY - 100.0)).abs() < 0.01);
+    }
+
+    // ---- long uptime ----
+
+    /// A week of running must not freeze anything that depends on time.
+    const WEEK: f64 = 7.0 * 24.0 * 3600.0;
+
+    #[test]
+    fn time_still_advances_after_a_week() {
+        let mut w = World::new(51);
+        w.t = WEEK;
+        w.play.set_clock(WEEK);
+        step_s(&mut w, DT, 0.0, &[]);
+        assert!(w.t > WEEK);
+        assert!((w.t - WEEK - DT as f64).abs() < 1e-6);
+    }
+
+    #[test]
+    fn lights_still_twinkle_after_a_week() {
+        let mut w = World::new(51);
+        w.t = WEEK;
+        let s = lit(LightsMode::ScreenTop, LightsPattern::Twinkle, 0.0);
+        let (a, _) = draw_with(&mut w, &s, &[]);
+        for _ in 0..20 {
+            draw_with(&mut w, &s, &[]);
+        }
+        let (b, _) = draw_with(&mut w, &s, &[]);
+        assert_ne!(a, b, "twinkle must keep changing");
+    }
+
+    #[test]
+    fn throwing_still_works_after_a_week() {
+        let (mut w, surfaces) = play_world(20.0);
+        w.t = WEEK;
+        w.play.set_clock(WEEK);
+        roll(&mut w, &surfaces, 300.0, 440.0);
+        let grab = (440.0, GY - 8.0);
+        ptr(&mut w, &surfaces, grab.0, grab.1, true, false);
+        glide(&mut w, &surfaces, grab, (740.0, GY - 308.0), 15.0, true);
+        ptr(&mut w, &surfaces, 740.0, GY - 308.0, false, false);
+        assert_eq!(w.play.flying.len(), 1, "a flick must still count as a throw");
     }
 }

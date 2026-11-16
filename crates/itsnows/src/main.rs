@@ -3,6 +3,8 @@
 
 #[cfg_attr(not(windows), allow(dead_code))]
 mod config;
+#[cfg_attr(not(windows), allow(dead_code))]
+mod pacing;
 #[cfg(windows)]
 mod gfx;
 #[cfg(windows)]

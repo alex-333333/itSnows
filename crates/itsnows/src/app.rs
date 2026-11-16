@@ -13,7 +13,7 @@ use crate::config::AppSettings;
 use crate::gfx::Gfx;
 use crate::overlay::{self, Event, Overlay};
 use crate::tray::{Command, MenuState, Tray};
-use crate::{hotkeys, system, tracker};
+use crate::{hotkeys, pacing, system, tracker};
 
 const FULLSCREEN_POLL: Duration = Duration::from_secs(1);
 const BATTERY_POLL: Duration = Duration::from_secs(10);
@@ -79,6 +79,12 @@ impl App {
             return;
         }
         self.play = on;
+        if !on {
+            // Do not keep the mouse if play mode ended in the middle of a drag.
+            unsafe {
+                let _ = windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture();
+            }
+        }
         overlay::reset_pointer();
         self.overlay.set_click_through(!on);
         hotkeys::set_escape(on);
@@ -114,6 +120,15 @@ impl App {
             Command::TogglePause => {
                 self.settings.paused = !self.settings.paused;
                 self.apply_visibility();
+                self.changed();
+            }
+            Command::ToggleHotkeys => {
+                self.settings.hotkeys = !self.settings.hotkeys;
+                if self.settings.hotkeys {
+                    hotkeys::register_all();
+                } else {
+                    hotkeys::unregister_all();
+                }
                 self.changed();
             }
             Command::Exit => self.quit = true,
@@ -178,17 +193,19 @@ impl App {
         !self.quit
     }
 
-    /// Draw one frame. On failure the device is dropped and rebuilt next time.
-    fn render(&mut self, prims: &[Prim]) {
+    /// Draw one frame. Returns false on failure; the device is then dropped
+    /// and rebuilt on the next call.
+    fn render(&mut self, prims: &[Prim]) -> bool {
         if self.gfx.is_none() {
             self.gfx = Gfx::new(self.overlay.hwnd, self.overlay.width, self.overlay.height).ok();
         }
-        let sync_interval = if self.on_battery { 2 } else { 1 };
-        match self.gfx.as_mut().map(|g| g.render(prims, sync_interval)) {
-            Some(Ok(())) => {}
+        // Frame rate is set by the limiter in the loop, not by the display.
+        match self.gfx.as_mut().map(|g| g.render(prims, 1)) {
+            Some(Ok(())) => true,
             _ => {
                 self.gfx = None;
                 wait(500);
+                false
             }
         }
     }
@@ -204,21 +221,30 @@ pub fn run() {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     }
 
-    let Ok(overlay) = Overlay::create() else { return };
-    let Ok(tray) = Tray::create() else { return };
+    let Ok(overlay) = Overlay::create() else {
+        system::fatal("itSnows could not create its overlay window.");
+        return;
+    };
+    let Ok(tray) = Tray::create() else {
+        system::fatal("itSnows could not create its notification-area icon.");
+        return;
+    };
     overlay::set_taskbar_created_message(tray.taskbar_created);
     system::watch_session(tray.hwnd);
-    hotkeys::register_all();
+    let settings = load_settings();
+    if settings.hotkeys {
+        hotkeys::register_all();
+    }
 
     let mut app = App {
         overlay,
         tray,
         gfx: None,
         world: World::new(seed()),
-        settings: load_settings(),
+        settings,
         play: false,
         locked: false,
-        fullscreen: system::fullscreen_app_active(),
+        fullscreen: system::should_hide(),
         on_battery: system::on_battery(),
         quit: false,
     };
@@ -226,6 +252,9 @@ pub fn run() {
     app.apply_visibility();
 
     let mut prims: Vec<Prim> = Vec::new();
+    // What is on screen now, so an unchanged idle frame is not drawn again.
+    let mut shown: Vec<Prim> = Vec::new();
+    let mut shown_valid = false;
     let mut last = Instant::now();
     let mut fullscreen_checked = last;
     let mut battery_checked = last;
@@ -237,7 +266,7 @@ pub fn run() {
         let now = Instant::now();
         if now - fullscreen_checked >= FULLSCREEN_POLL {
             fullscreen_checked = now;
-            let fullscreen = system::fullscreen_app_active();
+            let fullscreen = system::should_hide();
             if fullscreen != app.fullscreen {
                 app.fullscreen = fullscreen;
                 app.apply_visibility();
@@ -250,6 +279,7 @@ pub fn run() {
 
         if app.hidden() {
             last = now;
+            shown_valid = false;
             wait(IDLE_WAIT_MS);
             continue;
         }
@@ -285,13 +315,30 @@ pub fn run() {
 
         prims.clear();
         app.world.draw(&mut prims);
-        app.render(&prims);
+        if app.gfx.is_none() {
+            shown_valid = false;
+        }
+        if !shown_valid || pacing::should_present(out.idle, &prims, &shown) {
+            shown_valid = app.render(&prims);
+            if out.idle {
+                shown.clone_from(&prims);
+            }
+        }
         if out.idle {
-            // Nothing is moving: drop to a few frames a second. Still drawn,
-            // because standing things (lights, snowmen) follow the desktop.
+            // Nothing is moving: look again a few times a second, and draw
+            // only if standing things (lights, snowmen) moved with the desktop.
             wait(IDLE_WAIT_MS);
+        } else {
+            shown_valid = false;
+            // Cap the frame rate whatever the display's refresh rate is, and
+            // never spin if presenting returns at once (display off).
+            let pause = pacing::frame_wait_ms(now.elapsed().as_secs_f32(), app.on_battery);
+            if pause > 0 {
+                wait(pause);
+            }
         }
     }
 
     hotkeys::unregister_all();
+    hotkeys::set_escape(false);
 }

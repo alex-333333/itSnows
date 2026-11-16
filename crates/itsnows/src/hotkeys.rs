@@ -32,9 +32,10 @@ pub fn set_escape(on: bool) {
     }
 }
 
+/// Release the always-on hotkeys. Esc is handled by `set_escape`.
 pub fn unregister_all() {
     unsafe {
-        for id in [PLAY, UP, DOWN, PAUSE, ESCAPE] {
+        for id in [PLAY, UP, DOWN, PAUSE] {
             let _ = UnregisterHotKey(None, id);
         }
     }

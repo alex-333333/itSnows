@@ -87,9 +87,10 @@ pub struct Play {
     held: Option<Held>,
     prev: Option<Pointer>,
     still_for: f32,
-    clock: f32,
+    /// f64: the app may run for weeks.
+    clock: f64,
     /// Recent pointer positions: (time, x, y).
-    trail: Vec<(f32, f32, f32)>,
+    trail: Vec<(f64, f32, f32)>,
     active: bool,
 }
 
@@ -109,6 +110,11 @@ fn seat(stack: &mut Stack, gy: f32) {
 }
 
 impl Play {
+    #[cfg(test)]
+    pub(crate) fn set_clock(&mut self, t: f64) {
+        self.clock = t;
+    }
+
     /// Free balls: standing, held or in the air. Snowmen are not counted.
     pub fn ball_count(&self) -> usize {
         self.stacks.iter().filter(|s| s.look.is_none()).map(|s| s.balls.len()).sum::<usize>()
@@ -136,7 +142,7 @@ impl Play {
     /// for `PLAY_TIMEOUT` and should be switched off.
     #[allow(clippy::too_many_arguments)]
     pub fn step(&mut self, dt: f32, pointer: Option<Pointer>, surfaces: &mut Surfaces, flakes: &mut Flakes, rng: &mut Rng, w: f32, h: f32) -> bool {
-        self.clock += dt;
+        self.clock += dt as f64;
         self.active = pointer.is_some();
         let ground_y = surfaces.ground().map(|g| g.y);
         if let Some(gy) = ground_y {
@@ -167,7 +173,7 @@ impl Play {
                 exit = self.still_for >= PLAY_TIMEOUT;
 
                 self.trail.push((self.clock, p.x, p.y));
-                let cutoff = self.clock - 2.0 * SPEED_WINDOW;
+                let cutoff = self.clock - 2.0 * SPEED_WINDOW as f64;
                 self.trail.retain(|e| e.0 >= cutoff);
 
                 if p.left && !prev.left {
@@ -195,8 +201,8 @@ impl Play {
 
     fn pointer_velocity(&self) -> (f32, f32) {
         let Some(&(now, x, y)) = self.trail.last() else { return (0.0, 0.0) };
-        let Some(&(t0, x0, y0)) = self.trail.iter().find(|e| e.0 >= now - SPEED_WINDOW) else { return (0.0, 0.0) };
-        let span = now - t0;
+        let Some(&(t0, x0, y0)) = self.trail.iter().find(|e| e.0 >= now - SPEED_WINDOW as f64) else { return (0.0, 0.0) };
+        let span = (now - t0) as f32;
         if span <= 0.0 {
             (0.0, 0.0)
         } else {

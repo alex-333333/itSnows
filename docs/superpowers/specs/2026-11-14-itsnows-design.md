@@ -132,7 +132,8 @@ Uses Microsoft's `windows` crate for all OS calls.
   still reaches the taskbar behind a wall of windows. Everything that reaches
   the taskbar lands.
 - Caps: about 24 px on window tops (excess slides off the ends as falling
-  flakes), about 90 px on the taskbar.
+  flakes), about 40 px on the taskbar. *(revised after review from 90 px: a
+  taller band hid the bottom of maximised windows)*
 - When a window moves, resizes, closes, or gets covered, the snow on the
   affected segment falls off as a burst of flakes. *(builder's call)*
 - Piles very slowly melt when intensity is Off.
@@ -183,8 +184,10 @@ Uses Microsoft's `windows` crate for all OS calls.
 - Hidden from screen capture and screen sharing by default
   (`WDA_EXCLUDEFROMCAPTURE`), with a tray toggle to show it.
   *(builder's call on the default)*
-- 60 fps on mains power, 30 fps on battery. Rendering stops entirely when
-  intensity is Off and nothing on screen is moving.
+- At most 60 fps on mains power and 30 fps on battery, whatever the display's
+  refresh rate. When intensity is Off and nothing on screen is moving, a frame
+  is drawn only if something changed.
+- Also hidden when nobody is at the PC (screensaver, disconnected session).
 - Budget on an ordinary laptop at Medium: under 2 % CPU, under 60 MB RAM.
   These are targets to measure on a real PC, not guarantees.
 
@@ -196,7 +199,9 @@ Pause · Exit.
 
 Hotkeys: `Ctrl+Alt+S` play mode · `Ctrl+Alt+↑/↓` intensity ±10 % ·
 `Ctrl+Alt+P` pause. If a hotkey is already taken by another app, it is skipped
-and the tray menu still works.
+and the tray menu still works. A tray item, "Keyboard shortcuts", switches
+them all off *(added after review: `Ctrl+Alt` is AltGr on many keyboard
+layouts, and these combinations are used by some editors)*.
 
 Settings are saved to `%APPDATA%\itSnows\settings.json`. "Start with Windows"
 writes a per-user Run entry; no admin rights anywhere.
