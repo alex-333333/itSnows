@@ -6,6 +6,7 @@ use std::cell::RefCell;
 use windows::core::{w, Result};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 /// Things the window procedure saw that the frame loop needs to act on.
@@ -21,6 +22,60 @@ pub enum Event {
 
 thread_local! {
     static EVENTS: RefCell<Vec<Event>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Mouse state over the overlay, as seen by the window procedure. Only
+/// changes while play mode has click-through switched off.
+#[derive(Clone, Copy, Default)]
+struct Mouse {
+    x: i32,
+    y: i32,
+    left: bool,
+    right: bool,
+    /// A press happened since the last read, even if already released.
+    left_latch: bool,
+    right_latch: bool,
+}
+
+thread_local! {
+    static MOUSE: std::cell::Cell<Mouse> = const {
+        std::cell::Cell::new(Mouse { x: 0, y: 0, left: false, right: false, left_latch: false, right_latch: false })
+    };
+}
+
+fn update_mouse(f: impl FnOnce(&mut Mouse)) {
+    MOUSE.with(|c| {
+        let mut m = c.get();
+        f(&mut m);
+        c.set(m);
+    });
+}
+
+/// The pointer for this frame. A click shorter than a frame still reads as
+/// pressed once.
+pub fn pointer() -> snow_core::Pointer {
+    MOUSE.with(|c| {
+        let mut m = c.get();
+        let p = snow_core::Pointer { x: m.x as f32, y: m.y as f32, left: m.left || m.left_latch, right: m.right || m.right_latch };
+        m.left_latch = false;
+        m.right_latch = false;
+        c.set(m);
+        p
+    })
+}
+
+/// Forget held buttons (play mode was switched off mid-drag).
+pub fn reset_pointer() {
+    update_mouse(|m| {
+        m.left = false;
+        m.right = false;
+        m.left_latch = false;
+        m.right_latch = false;
+    });
+}
+
+fn mouse_xy(lparam: LPARAM) -> (i32, i32) {
+    ((lparam.0 & 0xFFFF) as i16 as i32, ((lparam.0 >> 16) & 0xFFFF) as i16 as i32)
 }
 
 pub fn push_event(e: Event) {
@@ -160,6 +215,45 @@ pub unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
             LRESULT(0)
         }
         WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
+        WM_MOUSEMOVE | WM_LBUTTONDOWN | WM_LBUTTONUP | WM_RBUTTONDOWN | WM_RBUTTONUP => {
+            // The overlay sits at the screen origin, so client == screen coordinates.
+            let (x, y) = mouse_xy(lparam);
+            update_mouse(|m| {
+                m.x = x;
+                m.y = y;
+                match msg {
+                    WM_LBUTTONDOWN => {
+                        m.left = true;
+                        m.left_latch = true;
+                    }
+                    WM_LBUTTONUP => m.left = false,
+                    WM_RBUTTONDOWN => {
+                        m.right = true;
+                        m.right_latch = true;
+                    }
+                    WM_RBUTTONUP => m.right = false,
+                    _ => {}
+                }
+            });
+            // Keep receiving the drag even if the pointer leaves the screen edge.
+            match msg {
+                WM_LBUTTONDOWN => {
+                    SetCapture(hwnd);
+                }
+                WM_LBUTTONUP => {
+                    let _ = ReleaseCapture();
+                }
+                _ => {}
+            }
+            LRESULT(0)
+        }
+        WM_SETCURSOR if OVERLAY.with(|c| c.get()) == hwnd.0 as isize => {
+            // Only reached in play mode; otherwise the mouse never touches the overlay.
+            if let Ok(hand) = LoadCursorW(None, IDC_HAND) {
+                SetCursor(Some(hand));
+            }
+            LRESULT(1)
+        }
         WM_DISPLAYCHANGE => {
             push_event(Event::DisplayChange);
             LRESULT(0)

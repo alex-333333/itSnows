@@ -79,6 +79,7 @@ impl App {
             return;
         }
         self.play = on;
+        overlay::reset_pointer();
         self.overlay.set_click_through(!on);
         hotkeys::set_escape(on);
     }
@@ -276,7 +277,7 @@ pub fn run() {
             height: app.overlay.height as f32,
             surfaces: &surfaces,
             settings: &core_settings,
-            pointer: None,
+            pointer: app.play.then(overlay::pointer),
         });
         if out.exit_play {
             app.set_play(false);
