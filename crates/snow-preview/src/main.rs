@@ -146,6 +146,72 @@ fn scene_lights(out: PathBuf) {
     s.shoot();
 }
 
+#[allow(dead_code)]
+impl Sim {
+    /// Hold the pointer at a spot for one frame.
+    fn point(&mut self, x: f32, y: f32, left: bool) {
+        self.pointer = Some(Pointer { x, y, left, right: false });
+        self.step();
+    }
+
+    /// Move the pointer in a straight line, `speed` px per frame.
+    fn glide(&mut self, from: (f32, f32), to: (f32, f32), speed: f32, left: bool) {
+        let dist = ((to.0 - from.0).powi(2) + (to.1 - from.1).powi(2)).sqrt();
+        let steps = (dist / speed).ceil().max(1.0) as usize;
+        for k in 1..=steps {
+            let u = k as f32 / steps as f32;
+            self.point(from.0 + (to.0 - from.0) * u, from.1 + (to.1 - from.1) * u, left);
+        }
+    }
+
+    fn roll(&mut self, x0: f32, x1: f32) {
+        let y = self.h - TASKBAR_H - 5.0;
+        self.point(x0, y, false);
+        self.point(x0, y, true);
+        self.glide((x0, y), (x1, y), 4.0, true);
+        self.point(x1, y, false);
+    }
+
+    fn carry(&mut self, from_x: f32, to_x: f32) {
+        let gy = self.h - TASKBAR_H;
+        let (grab, up, over) = ((from_x, gy - 8.0), (from_x, gy - 250.0), (to_x, gy - 250.0));
+        self.point(grab.0, grab.1, false);
+        self.point(grab.0, grab.1, true);
+        self.glide(grab, up, 8.0, true);
+        self.glide(up, over, 8.0, true);
+        for _ in 0..15 {
+            self.point(over.0, over.1, true);
+        }
+        self.point(over.0, over.1, false);
+    }
+}
+
+fn scene_snowman(out: PathBuf) {
+    let mut s = Sim::new("snowman", out, 1280.0, 720.0, 0.6);
+    s.desktop(&[win(11, 700.0, 160.0, 1180.0, 480.0)]);
+    // Let a decent layer build up first.
+    s.run(420.0);
+    s.shoot();
+    // First snowman: three balls, stacked.
+    s.roll(120.0, 330.0);
+    s.shoot();
+    s.roll(420.0, 520.0);
+    s.roll(600.0, 640.0);
+    s.carry(520.0, 330.0);
+    s.carry(640.0, 330.0);
+    // A second, with a ball left lying about.
+    s.roll(1150.0, 960.0);
+    s.roll(900.0, 800.0);
+    s.roll(760.0, 720.0);
+    s.carry(800.0, 960.0);
+    s.carry(720.0, 960.0);
+    s.roll(540.0, 600.0);
+    s.shoot();
+    s.pointer = None;
+    s.run(30.0);
+    s.shoot();
+}
+
 fn scene_snow(out: PathBuf) {
     let mut s = Sim::new("snow", out, 1280.0, 720.0, 0.5);
     for secs in [5.0, 10.0, 15.0] {
@@ -163,8 +229,9 @@ fn main() {
         "piles" => scene_piles(out),
         "blower" => scene_blower(out),
         "lights" => scene_lights(out),
+        "snowman" => scene_snowman(out),
         _ => {
-            eprintln!("usage: snow-preview <scene> [out_dir]\nscenes: snow piles blower lights");
+            eprintln!("usage: snow-preview <scene> [out_dir]\nscenes: snow piles blower lights snowman");
             std::process::exit(2);
         }
     }

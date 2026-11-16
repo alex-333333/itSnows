@@ -6,6 +6,7 @@ pub mod flakes;
 pub mod lights;
 pub mod occlusion;
 pub mod pile;
+pub mod play;
 pub mod prim;
 pub mod rng;
 pub mod surfaces;
